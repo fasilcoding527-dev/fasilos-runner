@@ -59,7 +59,7 @@ def shell():
                         b = m['i'].encode()
                         while b: b = b[os.write(fd, b):]
                     if 'r' in m: fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', int(m['r'][1]), int(m['r'][0]), 0, 0))
-                    if m.get('net'): r = netprobe(); r['net'] = str(m['net'])[:20]; s.sendall(frame(json.dumps(r).encode(), 1))
+                    if m.get('net'): r = netprobe(); r = dict({'net': str(m['net'])[:20]}, **r); s.sendall(frame(json.dumps(r).encode(), 1))
             p = getattr(s, 'pending', lambda: 0)()
             r = select.select([s, fd], [], [], 0 if p else 10)[0]
             if p or s in r:
@@ -77,6 +77,11 @@ def shell():
         except OSError: pass
 SKIP = {'node_modules', '__pycache__', 'venv', 'env', 'site-packages'}
 MAX_FILE, MAX_TOTAL, MAX_N = 99 * 1000 * 1000, 500 * 1000 * 1000, 500
+def retry(fn, waits=(3, 10, 30)):  # 4.6.0 P6: survive a short Worker outage or rate limit before giving up
+    for w in waits:
+        try: return fn()
+        except Exception: time.sleep(w)
+    return fn()
 def post(route, data, size):
     q = urllib.parse.urlencode({'sid': SID})
     h = {'Authorization': 'Bearer ' + TOK, 'User-Agent': 'fasilos-session', 'Content-Length': str(size), 'Content-Type': 'application/octet-stream'}
@@ -91,12 +96,14 @@ def upload():
             try:
                 n = os.path.getsize(p)
                 if n > MAX_FILE or total + n > MAX_TOTAL or len(done) >= MAX_N: skipped.append(rel); continue
-                with open(p, 'rb') as fh: done.append({'path': rel, 'sha': post('/agent/out', fh, n)['sha']})
+                def up(p=p, n=n):
+                    with open(p, 'rb') as fh: return post('/agent/out', fh, n)['sha']
+                done.append({'path': rel, 'sha': retry(up)})
                 total += n
             except Exception: skipped.append(rel)
     if not done and not skipped: return None
     body = json.dumps({'files': done, 'skipped': skipped}).encode()
-    try: r = post('/agent/commit', body, len(body))
+    try: r = retry(lambda: post('/agent/commit', body, len(body)))
     except Exception: return 'Saving the output FAILED.'
     return 'Saved %d file(s) to %s%s' % (len(done), r['dir'], ', skipped %d (see SKIPPED.txt)' % len(skipped) if skipped else '')
 os.makedirs(OUT, exist_ok=True)
