@@ -28,6 +28,11 @@ def parse(buf):
         if len(buf) < at + n: return
         op, d = buf[0] & 15, bytes(buf[at:at + n]); del buf[:at + n]; yield op, d
 
+def retry(fn, waits=(3, 10, 30)):  # 4.6.0 P6: a short Worker outage or a rate limit must not lose the results: try again a few times before giving up
+    for w in waits:
+        try: return fn()
+        except Exception: time.sleep(w)
+    return fn()
 def http(route, data=None, size=None, timeout=300):
     h = {'Authorization': 'Bearer ' + TOK, 'User-Agent': 'fasilos-session'}
     if data is not None: h['Content-Type'] = 'application/octet-stream'; h['Content-Length'] = str(len(data) if size is None else size)
@@ -203,7 +208,7 @@ def run():
             elif op == 1:
                 try: m = json.loads(d)
                 except ValueError: continue
-                if m.get('net'): r = netprobe(); r['net'] = str(m['net'])[:20]; S.sendall(frame(json.dumps(r).encode(), 1)); continue
+                if m.get('net'): r = netprobe(); r = dict({'net': str(m['net'])[:20]}, **r); S.sendall(frame(json.dumps(r).encode(), 1)); continue
                 c = m.get('ctl')
                 if c == 'stop' or (c == 'finish' and not AI): stop = 'owner'
                 elif AI and c == 'finish': fin = {'status': m.get('status') if m.get('status') in ('ok', 'failed') else 'ok', 'note': str(m.get('note') or '')[:300]}
@@ -256,7 +261,9 @@ def finish():
     real, skipped, total = collect(); done = []; push_fail = False; dirp = None; logsent = None
     for p, rel, n in real:
         try:
-            with open(p, 'rb') as fh: done.append({'path': rel, 'sha': json.loads(http('/agent/out', fh, n))['sha']})
+            def up(p=p, n=n):
+                with open(p, 'rb') as fh: return json.loads(http('/agent/out', fh, n))['sha']
+            done.append({'path': rel, 'sha': retry(up)})
         except Exception as e: skipped.append(rel + ' (upload failed)'); total -= n
     if skipped: open(LOGS + '/SKIPPED.txt', 'w').write('Not saved (limit per file 95 MB, total size limit, 500 files, or upload failed):\n' + '\n'.join(skipped[:500]) + '\n')
     lg('files: %d saved, %d skipped, %d bytes' % (len(done), len(skipped), total)); LOGF.close()
@@ -267,9 +274,11 @@ def finish():
         for f in sorted(os.listdir(LOGS)):
             p = os.path.join(LOGS, f)
             try:
-                with open(p, 'rb') as fh: done.append({'path': 'logs/' + f, 'sha': json.loads(http('/agent/out', fh, os.path.getsize(p)))['sha']})
+                def up(p=p):
+                    with open(p, 'rb') as fh: return json.loads(http('/agent/out', fh, os.path.getsize(p)))['sha']
+                done.append({'path': 'logs/' + f, 'sha': retry(up)})
             except Exception: pass
-        try: dirp = json.loads(http('/agent/commit', json.dumps({'files': done, 'skipped': []}).encode()))['dir']
+        try: dirp = retry(lambda: json.loads(http('/agent/commit', json.dumps({'files': done, 'skipped': []}).encode()))['dir'])
         except Exception: push_fail = True
     if not done or push_fail:
         if len(logb) > TG_LOG: logb = logb[-TG_LOG:]; logsent = 'tail'
@@ -277,9 +286,8 @@ def finish():
     rep = {'status': status, 'by': by, 'sec': int(time.time() - T0), 'files': len([d for d in done if not d['path'].startswith('logs/')]), 'bytes': total, 'skipped': skipped[:20], 'nskipped': len(skipped), 'dir': dirp, 'pushFailed': push_fail, 'logSent': logsent,
            'scripts': [{'name': r['step']['sc']['name'], 'ok': r['code'] == 0, 'code': r['code'], 'sec': r['sec']} for r in res if r.get('step') and r['step']['sc']], 'setupFailed': [r['step']['label'] for r in res if r.get('step') and not r['step']['sc'] and r['code']], 'planned': len(en), 'ai': 1 if AI else 0, 'cmds': NCMD[0], 'note': anote, 'summary': summ}
     body = json.dumps(rep).encode() + b'\n' + (logb if logsent else b'')
-    for i in range(3):
-        try: http('/agent/finish', body); break
-        except Exception: time.sleep(2 + i * 3)
+    try: retry(lambda: http('/agent/finish', body), (2, 5, 10, 30, 60))
+    except Exception: pass
     try: S.sendall(frame(b'', 8)); S.close()
     except OSError: pass
 finish()
