@@ -1,0 +1,24 @@
+name: fasilos-session
+on:
+  workflow_dispatch:
+    inputs:
+      sid:
+        required: true
+      kind:
+        default: session
+permissions:
+  contents: read
+jobs:
+  session:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: python3 fasilos/$KIND.py
+        env:
+          KIND: ${{ inputs.kind }}
+          SID: ${{ inputs.sid }}
+          FASIL_URL: ${{ secrets.FASIL_URL }}
+          FASIL_KEY: ${{ secrets.FASIL_KEY }}
